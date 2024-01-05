@@ -1,131 +1,165 @@
 # -*- coding: utf-8 -*-
-"""
-Created on Mon Dec  4 19:22:09 2023
-
-@author: hlary
-"""
-
-import pandas as pd
-import numpy as np
+import tensorflow as tf
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from tensorflow.keras import layers, losses
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense
+# Web framework that provides the configuration to deploy web applications
 from flask import Flask, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-# Cargar el dataset sin encabezados
-df = pd.read_csv(r"C:\Users\hlary\OneDrive\Escritorio\Skool\2 Big Data\Practicas\ecg.csv", header=None)
+df = pd.read_csv('http://storage.googleapis.com/download.tensorflow.org/data/ecg.csv', header=None)
+df.head()
 
-# Separar en dos conjuntos: normal y anormal
-normal_data = df[df.iloc[:, -1] == 0].iloc[:, :-1]
-abnormal_data = df[df.iloc[:, -1] == 1].iloc[:, :-1]
+# Now we will separate the data and labels so that it will be easy for us
+data = df.iloc[:,:-1].values
+labels = df.iloc[:,-1].values
+labels
 
-# Imprimir ambos conjuntos individualmente
-plt.figure(figsize=(15, 5))
+train_data, test_data, train_labels, test_labels = train_test_split(data, labels, test_size = 0.2, random_state = 21)
+
+# Now lets normalize the data
+# First we will calculate the maximum and minimum value from the training set 
+min = tf.reduce_min(train_data)
+max = tf.reduce_max(train_data)
+
+# Now we will use the formula (data - min)/(max - min)
+train_data = (train_data - min)/(max - min)
+test_data = (test_data - min)/(max - min)
+
+# Converted the data into float
+train_data = tf.cast(train_data, dtype=tf.float32)
+test_data = tf.cast(test_data, dtype=tf.float32)
+
+# The labels are either 0 or 1, so I will convert them into boolean(true or false) 
+train_labels = train_labels.astype(bool)
+test_labels = test_labels.astype(bool)
+
+# Now let's separate the data for normal ECG from that of abnormal ones
+# Normal ECG data
+n_train_data = train_data[train_labels]
+n_test_data = test_data[test_labels]
+
+# Abnormal ECG data
+an_train_data = train_data[~train_labels]
+an_test_data = test_data[~test_labels]
+
+print(n_train_data)
+
+# Create a single subplot for both charts
+plt.figure(figsize=(12, 6))
+
+# Normal ECG plot
 plt.subplot(1, 2, 1)
-plt.plot(normal_data.values.T, color='blue', alpha=0.5)
-plt.title('Conjunto de Datos Normal')
-plt.xlabel('Tiempo')
-plt.ylabel('Amplitud')
+plt.plot(np.arange(140), n_train_data[0], color='green')
+plt.grid()
+plt.title('Normal ECG')
+
+# Abnormal ECG plot
 plt.subplot(1, 2, 2)
-plt.plot(abnormal_data.values.T, color='red', alpha=0.5)
-plt.title('Conjunto de Datos Anormal')
-plt.xlabel('Tiempo')
-plt.ylabel('Amplitud')
+plt.plot(np.arange(140), an_train_data[0], color='red')
+plt.grid()
+plt.title('Anormal ECG')
+
+# Design adjustments
 plt.tight_layout()
 plt.show()
 
-# Preprocesamiento y escalamiento de datos
-scaler = StandardScaler()
-normal_data_scaled = scaler.fit_transform(normal_data)
-abnormal_data_scaled = scaler.transform(abnormal_data)
 
-# Dividir los conjuntos en entrenamiento y prueba
-X_train_normal, X_test_normal = train_test_split(normal_data_scaled, test_size=0.2, random_state=42)
-X_train_abnormal, X_test_abnormal = train_test_split(abnormal_data_scaled, test_size=0.2, random_state=42)
+# Now let's define the model!
+#  Here I have used the Model Subclassing API (but we can also use the Sequential API)
+#  The model has 2 parts : 1. Encoder and 2. Decoder
+ 
+class detector(Model):
+  def __init__(self):
+    super(detector, self).__init__()
+    self.encoder = tf.keras.Sequential([
+                                        layers.Dense(32, activation='relu'),
+                                        layers.Dense(16, activation='relu'),
+                                        layers.Dense(8, activation='relu')
+    ])
+    self.decoder = tf.keras.Sequential([
+                                        layers.Dense(16, activation='relu'),
+                                        layers.Dense(32, activation='relu'),
+                                        layers.Dense(140, activation='sigmoid')
+    ])
 
-# Autoencoder simple para comparar las diferencias
-input_dim = normal_data.shape[1]
+  def call(self, x):
+    encoded = self.encoder(x)
+    decoded = self.decoder(encoded)
+    return decoded
 
-# Definir el modelo del autoencoder
-input_layer = Input(shape=(input_dim,))
-encoded_dim = 32  # Dimensión del espacio latente
-encoded = Dense(encoded_dim, activation='relu')(input_layer)
-decoded = Dense(input_dim, activation='sigmoid')(encoded)
-autoencoder = Model(input_layer, decoded)
-autoencoder.compile(optimizer='adam', loss='mse')
+# Let's compile and train the model!!
+autoencoder = detector()
+autoencoder.compile(optimizer='adam', loss='mae')
+autoencoder.fit(n_train_data, n_train_data, epochs = 20, batch_size=512, validation_data=(n_test_data, n_test_data))
 
-import random
+# Now let's define a function in order to plot the original ECG and reconstructed ones and also show the error
+def plot(data, n):
+  enc_img = autoencoder.encoder(data)
+  dec_img = autoencoder.decoder(enc_img)
+  plt.plot(data[n], 'green')
+  plt.plot(dec_img[n], 'black')
+  plt.fill_between(np.arange(140), data[n], dec_img[n], color = 'lightblue')
+  plt.legend(labels=['Input', 'Reconstruction', 'Error'])
+  plt.show()
 
-# Entrenar el autoencoder en el conjunto de datos normales
-x_values = list()
-y_values = list()
-epochs = 50 # Número total de épocas
-for epoch in range(epochs):
-    autoencoder.fit(X_train_normal, X_train_normal, epochs=1, batch_size=64, shuffle=True,
-                    validation_data=(X_test_normal, X_test_normal))
-    x_values.append(epoch)
-    y_values.append(autoencoder.history.history['loss'][min(epoch, len(autoencoder.history.history['loss']) - 1)])
 
-# Seleccionar un único índice aleatorio para ambas muestras
-random_index = random.randint(0, len(X_test_normal) - 1)
-sample_normal = X_test_normal[random_index].reshape(1, -1)
-sample_abnormal = X_test_abnormal[random_index].reshape(1, -1)
+reconstructed = autoencoder(n_train_data)
+train_loss = losses.mae(reconstructed, n_train_data)
+t = np.mean(train_loss) + np.std(train_loss)
 
-# Reconstruir las muestras seleccionadas
-reconstructed_sample_normal = autoencoder.predict(sample_normal)
-reconstructed_sample_abnormal = autoencoder.predict(sample_abnormal)
+def prediction(model, data, threshold):
+  rec = model(data)
+  loss = losses.mae(rec, data)
+  return tf.math.less(loss, threshold)
+print(t)
 
-# Gráfico de la pérdida
-plt.plot(x_values, y_values, label='Pérdida')
-plt.title('Gráfico de Pérdida')
-plt.xlabel('Epoch')
-plt.ylabel('Pérdida')
-plt.legend()
-plt.show()
+pred = prediction(autoencoder, n_test_data, t)
+print(pred)
 
-# Gráfico con las muestras seleccionadas
-plt.figure(figsize=(15, 5))
-plt.subplot(1, 2, 1)
-plt.plot(sample_normal.T, label='Original', color='blue', alpha=0.5)
-plt.plot(reconstructed_sample_normal.T, label='Reconstruido', color='orange', alpha=0.5)
-plt.title('Muestra Normal Antes y Después del Autoencoder')
-plt.xlabel('Tiempo')
-plt.ylabel('Amplitud')
-plt.legend()
-plt.subplot(1, 2, 2)
-plt.plot(sample_abnormal.T, label='Original', color='red', alpha=0.5)
-plt.plot(reconstructed_sample_abnormal.T, label='Reconstruido', color='orange', alpha=0.5)
-plt.title('Muestra Anormal Antes y Después del Autoencoder')
-plt.xlabel('Tiempo')
-plt.ylabel('Amplitud')
-plt.legend()
-plt.tight_layout()
-plt.show()
+# Obtaining data
+n_train_data = train_data[train_labels]
+n_test_data = test_data[test_labels]
 
-# Gráfico con las reconstrucciones superpuestas
-plt.figure(figsize=(15, 5))
-plt.plot(reconstructed_sample_normal.T, label='Reconstruido Normal', color='orange', alpha=0.5)
-plt.plot(reconstructed_sample_abnormal.T, label='Reconstruido Anormal', color='purple', alpha=0.5)
-plt.title('Reconstrucciones Superpuestas de Muestras')
-plt.xlabel('Tiempo')
-plt.ylabel('Amplitud')
-plt.legend()
-plt.show()
+an_train_data = train_data[~train_labels]
+an_test_data = test_data[~test_labels]
 
-# Definir una ruta para devolver los datos de x e y
+# Format the data to be sent to our frontend
+def format_results(normal_data, abnormal_data):
+    results_normal = []
+    results_abnormal = []
+
+    for i in range(len(normal_data)):
+        result = {"x": i+1, "y": normal_data[i].numpy().tolist()}
+        results_normal.append(result)
+
+    for i in range(len(abnormal_data)):
+        result = {"x": i+1, "y": abnormal_data[i].numpy().tolist()}
+        results_abnormal.append(result)
+
+    return [results_normal, results_abnormal]
+
+
+# Let's see some more result visually !!
+
+plot(n_test_data, 0)
+plot(an_test_data, 0)
+
+# Data
 @app.route('/data', methods=['GET'])
-def obtener_datos():
-    respuesta = {
-        "x": x_values,
-        "y": y_values
-    }
-    return jsonify(respuesta)
+def get_formatted_data():
+    # Get formatted data
+    formatted_results = format_results(an_train_data[0], an_test_data[0])
 
-if __name__ == '__main__':
+    # Send the formatted data as a JSON formatted response
+    return jsonify(formatted_results)
+
+if __name__ == "__main__":
     app.run()
